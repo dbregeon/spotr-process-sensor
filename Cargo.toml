@@ -1,0 +1,14 @@
+[package]
+name = "spotr-process-sensor"
+version = "0.1.0"
+authors = ["dbregeon <denis.bregeon@digitalbrikes.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate_type = ["dylib"]
+
+[dependencies]
+regex = "1"
+spotr-sensing = { path = "../spotr-sensing", version = "0.1.0" }
