@@ -4,13 +4,13 @@ extern crate spotr_sensing;
 use std::fs;
 use std::result::Result;
 
-use spotr_sensing::{Sensor, Process};
+use spotr_sensing::{Sensor, SensorOutput};
 
 
 use regex::Regex;
 
 #[no_mangle]
-pub fn initialize() -> *mut dyn Sensor<Item = Process> {
+pub fn initialize() -> *mut dyn Sensor {
     Box::into_raw(Box::new(ProcessSensor))
 }
 
@@ -18,16 +18,16 @@ pub fn initialize() -> *mut dyn Sensor<Item = Process> {
 struct ProcessSensor;
 
 impl ProcessSensor {
-    fn read_proc<I>(paths: I) -> Vec<Process> where I: Iterator<Item = Result<fs::DirEntry, std::io::Error>> {
+    fn read_proc<I>(paths: I) -> Vec<SensorOutput> where I: Iterator<Item = Result<fs::DirEntry, std::io::Error>> {
         let input_re = Regex::new(r#"^(\d+)$"#).unwrap();
-        let mut processes = vec!();
+        let mut processes = Vec::new();
         for result in paths {
             match result {
                 Ok(entry) => {
                     let name = entry.file_name().into_string().unwrap();
                     for capture in input_re.captures_iter(name.as_str()) {
                         let pid = capture[1].parse::<u32>().unwrap();
-                        processes.push(Process { pid });
+                        processes.push(SensorOutput::Process { pid });
                     }
                 },
                 Err(_) => {}
@@ -38,9 +38,7 @@ impl ProcessSensor {
 }
 
 impl Sensor for ProcessSensor {
-    type Item = Process;
-
-    fn sample(&self) -> Result<Vec<Process>, std::io::Error> {
+    fn sample(&self) -> Result<Vec<SensorOutput>, std::io::Error> {
         let proc_read_result = fs::read_dir("/proc");
 
         match proc_read_result {
@@ -48,8 +46,6 @@ impl Sensor for ProcessSensor {
             Err(e) => Err(e)
         }
     }
-
-
 }
 
 #[cfg(test)]
@@ -77,7 +73,7 @@ mod tests {
         std::fs::remove_dir_all(&tmp_dir).unwrap();
 
         assert_eq!(2, processes.len());
-        let mut pids: Vec<u32> = processes.into_iter().map(|p| p.pid).collect();
+        let mut pids: Vec<u32> = processes.into_iter().map(|p| match p { super::SensorOutput::Process { pid } => pid, _ => 0}).collect();
         pids.sort();
         assert_eq!(12345, pids[0]);
         assert_eq!(54321, pids[1]);
