@@ -10,5 +10,8 @@ edition = "2018"
 crate_type = ["dylib"]
 
 [dependencies]
-regex = "1"
 spotr-sensing = { path = "../spotr-sensing", version = "0.1.0" }
+
+[target.x86_64-unknown-linux-gnu]
+linker = "/usr/bin/clang"
+rustflags = ["-Clink-arg=-fuse-ld=lld", "-Clink-arg=-Wl,--no-rosegment"]
