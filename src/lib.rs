@@ -21,36 +21,34 @@ impl ProcessSensor {
             seen_processes: HashSet::new(),
         }
     }
+
     fn read_proc<I>(&mut self, paths: I) -> Vec<SensorOutput>
     where
         I: Iterator<Item = Result<fs::DirEntry, std::io::Error>>,
     {
         let mut processes = Vec::new();
         let mut unseen_processes = self.seen_processes.clone();
-        for result in paths {
-            match result {
-                Ok(entry) => {
-                    let filename = &entry.file_name();
+        self.seen_processes.clear();
+        for entry in paths.filter_map(|entry_result| entry_result.ok()) {
+            let filename = &entry.file_name();
+            match filename.to_str().unwrap().parse::<u32>() {
+                Ok(pid) => {
                     let stat_file = &entry.path().join("stat");
-                    match filename.to_str().unwrap().parse::<u32>() {
-                        Ok(pid) => {
-                            let stat = match self.read_stat(stat_file) {
-                                Ok(stat) => {
-                                    let key = (pid, stat.comm.clone());
-                                    unseen_processes.remove(&key);
-                                    self.seen_processes.insert(key);
-                                    ProcessStats::Stat(stat)
-                                }
-                                Err(message) => ProcessStats::Error(message),
-                            };
-                            processes.push(SensorOutput::Process { pid, stat });
+                    let stat = match self.read_stat(stat_file) {
+                        Ok(stat) => {
+                            let key = (pid, stat.comm.clone());
+                            unseen_processes.remove(&key);
+                            self.seen_processes.insert(key);
+                            ProcessStats::Stat(stat)
                         }
-                        _ => (),
-                    }
+                        Err(message) => ProcessStats::Error(message),
+                    };
+                    processes.push(SensorOutput::Process { pid, stat });
                 }
-                Err(_) => {}
-            };
+                _ => (),
+            }
         }
+
         for key in unseen_processes {
             self.seen_processes.remove(&key);
             processes.push(SensorOutput::Process {
@@ -69,18 +67,14 @@ impl ProcessSensor {
 
     fn parse_stat_content(&self, content: String) -> Result<Stat, String> {
         let tail = content
-            .split(" (")
-            .skip(1)
-            .next()
+            .split_once(" (")
+            .map(|r| r.1.to_string())
             .ok_or("Invalid format for stat")?;
-        let mut comm_split = tail.split(") ");
-        let comm = comm_split
-            .next()
-            .ok_or("Invalid format for stat")?
-            .to_string();
-        let stats: Vec<String> = comm_split
-            .next()
-            .ok_or("Invalid format for stat")?
+        let (comm, remainder) = tail
+            .split_once(") ")
+            .map(|r| (r.0.to_string(), r.1))
+            .ok_or("Invalid format for stat")?;
+        let stats: Vec<String> = remainder
             .split_whitespace()
             .map(|s| s.to_string())
             .collect();
