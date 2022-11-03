@@ -1,6 +1,8 @@
 extern crate spotr_sensing;
 
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::Read;
 use std::result::Result;
 use std::{fs, path::PathBuf};
 
@@ -13,6 +15,34 @@ pub fn initialize(_: &str) -> *mut dyn Sensor {
 
 struct ProcessSensor {
     seen_processes: HashSet<(u32, String)>,
+}
+
+#[derive(Debug)]
+enum ErrorCode {
+    LineTooShort(String, usize),
+    UnexpectedCharacter(String, usize),
+    InvalidInput(String),
+    EmptyFile(String),
+    MissingMetaData(String),
+    MissingFile(String),
+}
+
+impl ErrorCode {
+    fn unexpected_character(content: &Vec<u8>, position: usize) -> ErrorCode {
+        Self::UnexpectedCharacter(Self::content_as_string(content), position)
+    }
+
+    fn line_too_short(content: &Vec<u8>, position: usize) -> ErrorCode {
+        Self::LineTooShort(Self::content_as_string(content), position)
+    }
+
+    fn invalid_input(content: &Vec<u8>) -> ErrorCode {
+        Self::InvalidInput(Self::content_as_string(content))
+    }
+
+    fn content_as_string(content: &Vec<u8>) -> String {
+        content.iter().map(|u| *u as char).collect()
+    }
 }
 
 impl ProcessSensor {
@@ -41,7 +71,11 @@ impl ProcessSensor {
                             self.seen_processes.insert(key);
                             ProcessStats::Stat(stat)
                         }
-                        Err(message) => ProcessStats::Error(message),
+                        Err(code) => {
+                            let message = format!("{:?}", code);
+                            println!("{}", message);
+                            ProcessStats::Error(message)
+                        }
                     };
                     processes.push(SensorOutput::Process { pid, stat });
                 }
@@ -59,82 +93,257 @@ impl ProcessSensor {
         processes
     }
 
-    fn read_stat(&self, file: &PathBuf) -> Result<Stat, String> {
-        fs::read_to_string(&file)
-            .map_err(|_| format!("{}: Not found", file.to_string_lossy()))
-            .and_then(|content| self.parse_stat_content(content))
+    fn read_stat(&self, file_path: &PathBuf) -> Result<Stat, ErrorCode> {
+        let mut file = File::open(file_path).map_err(|e| {
+            ErrorCode::MissingFile(format!("{}: {}", file_path.to_string_lossy(), e))
+        })?;
+        let metadata = file.metadata().map_err(|e| {
+            ErrorCode::MissingMetaData(format!("{}: {}", file_path.to_string_lossy(), e))
+        })?;
+        let mut buffer: Vec<u8> = Vec::with_capacity(metadata.len() as usize);
+        file.read_to_end(&mut buffer).unwrap();
+        if buffer.len() > 0 {
+            self.parse_stat_content(buffer)
+        } else {
+            Err(ErrorCode::EmptyFile(format!("{:?}", file_path)))
+        }
     }
 
-    fn parse_stat_content(&self, content: String) -> Result<Stat, String> {
-        let tail = content
-            .split_once(" (")
-            .map(|r| r.1.to_string())
-            .ok_or("Invalid format for stat")?;
-        let (comm, remainder) = tail
-            .split_once(") ")
-            .map(|r| (r.0.to_string(), r.1))
-            .ok_or("Invalid format for stat")?;
-        let stats: Vec<String> = remainder
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
-        if stats.len() < 35 {
-            Err("Line too short".to_string())
-        } else {
-            Ok(Stat {
-                comm,
-                state: stats[0].chars().next().unwrap(),
-                ppid: stats[1].parse().unwrap(),
-                pgrp: stats[2].parse().unwrap(),
-                session: stats[3].parse().unwrap(),
-                tty_nr: stats[4].parse().unwrap(),
-                tpgid: stats[5].parse().unwrap(),
-                flags: stats[6].parse().unwrap(),
-                minflt: stats[7].parse().unwrap(),
-                cminflt: stats[8].parse().unwrap(),
-                majflt: stats[9].parse().unwrap(),
-                cmajflt: stats[10].parse().unwrap(),
-                utime: stats[11].parse().unwrap(),
-                stime: stats[12].parse().unwrap(),
-                cutime: stats[13].parse().unwrap(),
-                cstime: stats[14].parse().unwrap(),
-                priority: stats[15].parse().unwrap(),
-                nice: stats[16].parse().unwrap(),
-                num_threads: stats[17].parse().unwrap(),
-                itrealvalue: stats[18].parse().unwrap(),
-                starttime: stats[19].parse().unwrap(),
-                vsize: stats[20].parse().unwrap(),
-                rss: stats[21].parse().unwrap(),
-                rsslim: stats[22].parse().unwrap(),
-                startcode: stats[23].parse().unwrap(),
-                endcode: stats[24].parse().unwrap(),
-                startstack: stats[25].parse().unwrap(),
-                kstkesp: stats[26].parse().unwrap(),
-                kstkeip: stats[27].parse().unwrap(),
-                signal: stats[28].parse().unwrap(),
-                blocked: stats[29].parse().unwrap(),
-                sigignore: stats[30].parse().unwrap(),
-                sigcatch: stats[31].parse().unwrap(),
-                wchan: stats[32].parse().unwrap(),
-                nswap: stats[33].parse().unwrap(),
-                cnswap: stats[34].parse().unwrap(),
-                exit_signal: stats.get(35).and_then(|v| v.parse().ok()),
-                processor: stats.get(36).and_then(|v| v.parse().ok()),
-                rt_priority: stats.get(37).and_then(|v| v.parse().ok()),
-                policy: stats.get(38).and_then(|v| v.parse().ok()),
-                delayacct_blkio_ticks: stats.get(39).and_then(|v| v.parse().ok()),
-                guest_time: stats.get(40).and_then(|v| v.parse().ok()),
-                cguest_time: stats.get(41).and_then(|v| v.parse().ok()),
-                start_data: stats.get(42).and_then(|v| v.parse().ok()),
-                end_data: stats.get(43).and_then(|v| v.parse().ok()),
-                start_brk: stats.get(44).and_then(|v| v.parse().ok()),
-                arg_start: stats.get(45).and_then(|v| v.parse().ok()),
-                arg_end: stats.get(46).and_then(|v| v.parse().ok()),
-                env_start: stats.get(47).and_then(|v| v.parse().ok()),
-                env_end: stats.get(48).and_then(|v| v.parse().ok()),
-                exit_code: stats.get(49).and_then(|v| v.parse().ok()),
-            })
+    fn parse_stat_content(&self, content: Vec<u8>) -> Result<Stat, ErrorCode> {
+        let mut position = 0;
+        // Skip the pid.
+        while position < content.len() && content[position] != '(' as u8 {
+            position += 1;
         }
+        // Strip the '('
+        while position < content.len() && content[position] == '(' as u8 {
+            position += 1;
+        }
+        let mut comm = String::with_capacity(16);
+        while position < content.len() && content[position] != ')' as u8 {
+            comm.push(content[position] as char);
+            position += 1;
+        }
+        // Skip the ') '
+        while position < content.len() && content[position] == ')' as u8 {
+            position += 1;
+        }
+        position += 1;
+        if position >= content.len() {
+            return Err(ErrorCode::invalid_input(&content));
+        }
+        let state = content[position] as char;
+        position += 2;
+        let (ppid, position) = next_u32(&content, position)?;
+        let (pgrp, position) = next_u32(&content, position)?;
+        let (session, position) = next_u32(&content, position)?;
+        let (tty_nr, position) = next_u32(&content, position)?;
+        let (tpgid, position) = next_i32(&content, position)?;
+        let (flags, position) = next_i32(&content, position)?;
+        let (minflt, position) = next_u64(&content, position)?;
+        let (cminflt, position) = next_u64(&content, position)?;
+        let (majflt, position) = next_u64(&content, position)?;
+        let (cmajflt, position) = next_u64(&content, position)?;
+        let (utime, position) = next_u64(&content, position)?;
+        let (stime, position) = next_u64(&content, position)?;
+        let (cutime, position) = next_u64(&content, position)?;
+        let (cstime, position) = next_u64(&content, position)?;
+        let (priority, position) = next_i64(&content, position)?;
+        let (nice, position) = next_i64(&content, position)?;
+        let (num_threads, position) = next_u64(&content, position)?;
+        let (itrealvalue, position) = next_u64(&content, position)?;
+        let (starttime, position) = next_u64(&content, position)?;
+        let (vsize, position) = next_u64(&content, position)?;
+        let (rss, position) = next_u64(&content, position)?;
+        let (rsslim, position) = next_u64(&content, position)?;
+        let (startcode, position) = next_u64(&content, position)?;
+        let (endcode, position) = next_u64(&content, position)?;
+        let (startstack, position) = next_u64(&content, position)?;
+        let (kstkesp, position) = next_u64(&content, position)?;
+        let (kstkeip, position) = next_u64(&content, position)?;
+        let (signal, position) = next_u64(&content, position)?;
+        let (blocked, position) = next_u64(&content, position)?;
+        let (sigignore, position) = next_u64(&content, position)?;
+        let (sigcatch, position) = next_u64(&content, position)?;
+        let (wchan, position) = next_u64(&content, position)?;
+        let (nswap, position) = next_u64(&content, position)?;
+        let (cnswap, position) = next_u64(&content, position)?;
+        let (exit_signal, position) = next_maybe_i32(&content, position)?;
+        let (processor, position) = next_maybe_u32(&content, position)?;
+        let (rt_priority, position) = next_maybe_u32(&content, position)?;
+        let (policy, position) = next_maybe_u32(&content, position)?;
+        let (delayacct_blkio_ticks, position) = next_maybe_u64(&content, position)?;
+        let (guest_time, position) = next_maybe_u64(&content, position)?;
+        let (cguest_time, position) = next_maybe_i64(&content, position)?;
+        let (start_data, position) = next_maybe_u64(&content, position)?;
+        let (end_data, position) = next_maybe_u64(&content, position)?;
+        let (start_brk, position) = next_maybe_u64(&content, position)?;
+        let (arg_start, position) = next_maybe_u64(&content, position)?;
+        let (arg_end, position) = next_maybe_u64(&content, position)?;
+        let (env_start, position) = next_maybe_u64(&content, position)?;
+        let (env_end, position) = next_maybe_u64(&content, position)?;
+        let (exit_code, _position) = next_maybe_i32(&content, position)?;
+
+        Ok(Stat {
+            comm,
+            state,
+            ppid,
+            pgrp,
+            session,
+            tty_nr,
+            tpgid,
+            flags,
+            minflt,
+            cminflt,
+            majflt,
+            cmajflt,
+            utime,
+            stime,
+            cutime,
+            cstime,
+            priority,
+            nice,
+            num_threads,
+            itrealvalue,
+            starttime,
+            vsize,
+            rss,
+            rsslim,
+            startcode,
+            endcode,
+            startstack,
+            kstkesp,
+            kstkeip,
+            signal,
+            blocked,
+            sigignore,
+            sigcatch,
+            wchan,
+            nswap,
+            cnswap,
+            exit_signal,
+            processor,
+            rt_priority,
+            policy,
+            delayacct_blkio_ticks,
+            guest_time,
+            cguest_time,
+            start_data,
+            end_data,
+            start_brk,
+            arg_start,
+            arg_end,
+            env_start,
+            env_end,
+            exit_code,
+        })
+    }
+}
+
+fn next_u32(content: &Vec<u8>, start_position: usize) -> Result<(u32, usize), ErrorCode> {
+    let mut position = start_position;
+    let mut result = 0;
+    while valid_non_blank_position(content, position) {
+        result = result * 10
+            + (content[position] as char)
+                .to_digit(10)
+                .ok_or_else(|| ErrorCode::unexpected_character(content, position))?;
+        position += 1;
+    }
+    if position == start_position {
+        Err(ErrorCode::line_too_short(content, position))
+    } else {
+        position += 1;
+        Ok((result, position))
+    }
+}
+
+fn next_i32(content: &Vec<u8>, start_position: usize) -> Result<(i32, usize), ErrorCode> {
+    let mut position = start_position;
+    let sign = if content[position] == '-' as u8 {
+        position = position + 1;
+        -1
+    } else {
+        1
+    };
+    next_u32(content, position).map(|(value, position)| (sign * value as i32, position))
+}
+
+fn next_maybe_u32(
+    content: &Vec<u8>,
+    start_position: usize,
+) -> Result<(Option<u32>, usize), ErrorCode> {
+    if content.len() <= start_position {
+        Ok((None, start_position))
+    } else {
+        next_u32(content, start_position).map(|(value, position)| (Some(value), position))
+    }
+}
+
+fn next_maybe_i32(
+    content: &Vec<u8>,
+    start_position: usize,
+) -> Result<(Option<i32>, usize), ErrorCode> {
+    if content.len() <= start_position {
+        Ok((None, start_position))
+    } else {
+        next_i32(content, start_position).map(|(value, position)| (Some(value), position))
+    }
+}
+
+fn valid_non_blank_position(content: &Vec<u8>, position: usize) -> bool {
+    position < content.len() && content[position] != ' ' as u8 && content[position] != '\n' as u8
+}
+
+fn next_u64(content: &Vec<u8>, start_position: usize) -> Result<(u64, usize), ErrorCode> {
+    let mut position = start_position;
+    let mut result = 0;
+    while valid_non_blank_position(content, position) {
+        result = result * 10
+            + (content[position] as char)
+                .to_digit(10)
+                .ok_or_else(|| ErrorCode::unexpected_character(content, position))?
+                as u64;
+        position += 1;
+    }
+    if position == start_position {
+        Err(ErrorCode::line_too_short(content, position))
+    } else {
+        position += 1;
+        Ok((result, position))
+    }
+}
+
+fn next_i64(content: &Vec<u8>, start_position: usize) -> Result<(i64, usize), ErrorCode> {
+    let mut position = start_position;
+    let sign = if content[position] == '-' as u8 {
+        position = position + 1;
+        -1
+    } else {
+        1
+    };
+    next_u64(content, position).map(|(value, position)| (sign * value as i64, position))
+}
+
+fn next_maybe_u64(
+    content: &Vec<u8>,
+    start_position: usize,
+) -> Result<(Option<u64>, usize), ErrorCode> {
+    if content.len() <= start_position {
+        Ok((None, start_position))
+    } else {
+        next_u64(content, start_position).map(|(value, position)| (Some(value), position))
+    }
+}
+
+fn next_maybe_i64(
+    content: &Vec<u8>,
+    start_position: usize,
+) -> Result<(Option<i64>, usize), ErrorCode> {
+    if content.len() <= start_position {
+        Ok((None, start_position))
+    } else {
+        next_i64(content, start_position).map(|(value, position)| (Some(value), position))
     }
 }
 
@@ -151,7 +360,7 @@ impl Sensor for ProcessSensor {
 
 #[cfg(test)]
 mod tests {
-    use crate::ProcessSensor;
+    use crate::{ErrorCode, ProcessSensor};
 
     #[test]
     fn read_proc_creates_a_process_sensor_with_empty_processes() {
@@ -191,6 +400,218 @@ mod tests {
     }
 
     #[test]
+    fn next_u32_parses_number() {
+        let buffer = vec![
+            '1' as u8, '2' as u8, '3' as u8, '4' as u8, ' ' as u8, '2' as u8,
+        ];
+        let (result, position) = super::next_u32(&buffer, 1).unwrap();
+        assert_eq!(234, result);
+        assert_eq!(5, position);
+    }
+
+    #[test]
+    fn next_maybe_u32_parses_number() {
+        let buffer = vec![
+            '1' as u8, '2' as u8, '3' as u8, '4' as u8, ' ' as u8, '2' as u8,
+        ];
+        match super::next_maybe_u32(&buffer, 1).unwrap() {
+            (Some(result), position) => {
+                assert_eq!(234, result);
+                assert_eq!(5, position);
+            }
+            (None, _position) => assert!(false, "Expected number to be parsed."),
+        }
+    }
+
+    #[test]
+    fn next_maybe_u32_returns_none() {
+        let buffer = vec!['1' as u8];
+        match super::next_maybe_u32(&buffer, 1).unwrap() {
+            (Some(_result), _position) => assert!(false, "Unexpected value parsed"),
+            (None, position) => assert_eq!(1, position),
+        }
+    }
+
+    #[test]
+    fn next_u32_reports_an_unexpected_character() {
+        let buffer = vec![
+            '1' as u8, '2' as u8, '3' as u8, 'a' as u8, ' ' as u8, '2' as u8,
+        ];
+        match super::next_u32(&buffer, 1).unwrap_err() {
+            ErrorCode::UnexpectedCharacter(content, position) => {
+                assert_eq!("123a 2", content.as_str());
+                assert_eq!(3, position);
+            }
+            e => {
+                assert!(false, "Unexpected error {:?}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn next_u32_reports_an_line_too_short() {
+        let buffer = vec!['1' as u8, '2' as u8, '3' as u8, ' ' as u8];
+        match super::next_u32(&buffer, 3).unwrap_err() {
+            ErrorCode::LineTooShort(content, position) => {
+                assert_eq!("123 ", content.as_str());
+                assert_eq!(3, position);
+            }
+            e => {
+                assert!(false, "Unexpected error {:?}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn next_u64_parses_number() {
+        let buffer = vec![
+            '1' as u8, '2' as u8, '3' as u8, '4' as u8, ' ' as u8, '2' as u8,
+        ];
+        let (result, position) = super::next_u64(&buffer, 1).unwrap();
+        assert_eq!(234, result);
+        assert_eq!(5, position);
+    }
+
+    #[test]
+    fn next_maybe_u64_parses_number() {
+        let buffer = vec![
+            '1' as u8, '2' as u8, '3' as u8, '4' as u8, ' ' as u8, '2' as u8,
+        ];
+        match super::next_maybe_u64(&buffer, 1).unwrap() {
+            (Some(result), position) => {
+                assert_eq!(234, result);
+                assert_eq!(5, position);
+            }
+            (None, _position) => assert!(false, "Expected number to be parsed."),
+        }
+    }
+
+    #[test]
+    fn next_maybe_u64_returns_none() {
+        let buffer = vec!['1' as u8];
+        match super::next_maybe_u64(&buffer, 1).unwrap() {
+            (Some(_result), _position) => assert!(false, "Unexpected value parsed"),
+            (None, position) => assert_eq!(1, position),
+        }
+    }
+
+    #[test]
+    fn next_u64_reports_an_unexpected_character() {
+        let buffer = vec![
+            '1' as u8, '2' as u8, '3' as u8, 'a' as u8, ' ' as u8, '2' as u8,
+        ];
+        match super::next_u64(&buffer, 1).unwrap_err() {
+            ErrorCode::UnexpectedCharacter(content, position) => {
+                assert_eq!("123a 2", content.as_str());
+                assert_eq!(3, position);
+            }
+            e => {
+                assert!(false, "Unexpected error {:?}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn next_u64_reports_an_line_too_short() {
+        let buffer = vec!['1' as u8, '2' as u8, '3' as u8, ' ' as u8];
+        match super::next_u64(&buffer, 3).unwrap_err() {
+            ErrorCode::LineTooShort(content, position) => {
+                assert_eq!("123 ", content.as_str());
+                assert_eq!(3, position);
+            }
+            e => {
+                assert!(false, "Unexpected error {:?}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn next_i32_parses_negative_number() {
+        let buffer = vec![
+            '1' as u8, '-' as u8, '2' as u8, '3' as u8, '4' as u8, ' ' as u8, '2' as u8,
+        ];
+        let (result, position) = super::next_i32(&buffer, 1).unwrap();
+        assert_eq!(-234, result);
+        assert_eq!(6, position);
+    }
+
+    #[test]
+    fn next_i32_parses_positive_number() {
+        let buffer = vec![
+            '1' as u8, '2' as u8, '3' as u8, '4' as u8, ' ' as u8, '2' as u8,
+        ];
+        let (result, position) = super::next_i32(&buffer, 1).unwrap();
+        assert_eq!(234, result);
+        assert_eq!(5, position);
+    }
+
+    #[test]
+    fn next_maybe_i32_parses_number() {
+        let buffer = vec![
+            '1' as u8, '2' as u8, '3' as u8, '4' as u8, ' ' as u8, '2' as u8,
+        ];
+        match super::next_maybe_i32(&buffer, 1).unwrap() {
+            (Some(result), position) => {
+                assert_eq!(234, result);
+                assert_eq!(5, position);
+            }
+            (None, _position) => assert!(false, "Expected number to be parsed."),
+        }
+    }
+
+    #[test]
+    fn next_maybe_i32_returns_none() {
+        let buffer = vec!['1' as u8];
+        match super::next_maybe_i32(&buffer, 1).unwrap() {
+            (Some(_result), _position) => assert!(false, "Unexpected value parsed"),
+            (None, position) => assert_eq!(1, position),
+        }
+    }
+
+    #[test]
+    fn next_i64_parses_negative_number() {
+        let buffer = vec![
+            '1' as u8, '-' as u8, '2' as u8, '3' as u8, '4' as u8, ' ' as u8, '2' as u8,
+        ];
+        let (result, position) = super::next_i64(&buffer, 1).unwrap();
+        assert_eq!(-234, result);
+        assert_eq!(6, position);
+    }
+
+    #[test]
+    fn next_i64_parses_positive_number() {
+        let buffer = vec![
+            '1' as u8, '2' as u8, '3' as u8, '4' as u8, ' ' as u8, '2' as u8,
+        ];
+        let (result, position) = super::next_i64(&buffer, 1).unwrap();
+        assert_eq!(234, result);
+        assert_eq!(5, position);
+    }
+
+    #[test]
+    fn next_maybe_i64_parses_number() {
+        let buffer = vec![
+            '1' as u8, '2' as u8, '3' as u8, '4' as u8, ' ' as u8, '2' as u8,
+        ];
+        match super::next_maybe_i64(&buffer, 1).unwrap() {
+            (Some(result), position) => {
+                assert_eq!(234, result);
+                assert_eq!(5, position);
+            }
+            (None, _position) => assert!(false, "Expected number to be parsed."),
+        }
+    }
+
+    #[test]
+    fn next_maybe_i64_returns_none() {
+        let buffer = vec!['1' as u8];
+        match super::next_maybe_i64(&buffer, 1).unwrap() {
+            (Some(_result), _position) => assert!(false, "Unexpected value parsed"),
+            (None, position) => assert_eq!(1, position),
+        }
+    }
+
+    #[test]
     fn read_proc_creates_a_process_sensor_ignores_non_numeric_directories() {
         let tmp_dir = std::env::temp_dir().join("spotr3");
         std::fs::create_dir_all(tmp_dir.join("p1234")).unwrap();
@@ -208,10 +629,12 @@ mod tests {
     #[test]
     fn parse_proc_errors_when_stat_format_incorrect() {
         let content = "4000 Command S 2957 2262 2262 0 -1 4194560 2869 0 9 0 8 6 0 0 20 0 5 0 6668 225017856 9295 18446744073709551615 94903732310016 94903732943512 140733005618320 0 0 0 0 69634 1073745144 0 0 0 17 1 0 0 0 0 0 94903732950432 94903732954352 94903761399808 140733005624370 140733005624599 140733005624599 140733005631437 0\n";
-        let parsed_content = ProcessSensor::new().parse_stat_content(content.to_string());
+        let parsed_content =
+            ProcessSensor::new().parse_stat_content(content.to_string().into_bytes());
 
         match parsed_content {
-            Err(message) => assert_eq!(message, "Invalid format for stat"),
+            Err(ErrorCode::InvalidInput(input)) => assert_eq!(content, input.as_str()),
+            Err(e) => assert!(false, "Unexpected error {:?}", e),
             Ok(_) => assert!(false, "Parse should have failed"),
         }
     }
@@ -219,10 +642,12 @@ mod tests {
     #[test]
     fn parse_proc_errors_when_stat_content_too_short() {
         let content = "4000 (Command) S 2957 2262 2262 0 -1 4194560 2869 0 9 0 8 6 0 0 20 0 5 0 6668 225017856 9295 18446744073709551615 94903732310016 94903732943512 140733005618320 0 0 0 0 69634 1073745144 0\n";
-        let parsed_content = ProcessSensor::new().parse_stat_content(content.to_string());
+        let parsed_content =
+            ProcessSensor::new().parse_stat_content(content.to_string().into_bytes());
 
         match parsed_content {
-            Err(message) => assert_eq!(message, "Line too short"),
+            Err(ErrorCode::LineTooShort(input, position)) => assert_eq!(content, input.as_str()),
+            Err(e) => assert!(false, "Unexpected error {:?}", e),
             Ok(_) => assert!(false, "Parse should have failed"),
         }
     }
@@ -231,7 +656,7 @@ mod tests {
     fn parse_proc_handles_space_in_parenthesis() {
         let content = "4000 (Socket Process) S 2957 2262 2262 0 -1 4194560 2869 0 9 0 8 6 0 0 20 0 5 0 6668 225017856 9295 18446744073709551615 94903732310016 94903732943512 140733005618320 0 0 0 0 69634 1073745144 0 0 0 17 1 0 0 0 0 0 94903732950432 94903732954352 94903761399808 140733005624370 140733005624599 140733005624599 140733005631437 0\n";
         let parsed_content = ProcessSensor::new()
-            .parse_stat_content(content.to_string())
+            .parse_stat_content(content.to_string().into_bytes())
             .unwrap();
 
         assert_eq!(parsed_content.comm, "Socket Process");
